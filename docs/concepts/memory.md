@@ -105,16 +105,23 @@ Defaults:
   2. `openai` if an OpenAI key can be resolved.
   3. `gemini` if a Gemini key can be resolved.
   4. `voyage` if a Voyage key can be resolved.
-  5. Otherwise memory search stays disabled until configured.
+  5. `mistral` if a Mistral key can be resolved.
+  6. Otherwise memory search stays disabled until configured.
 - Local mode uses node-llama-cpp and may require `pnpm approve-builds`.
 - Uses sqlite-vec (when available) to accelerate vector search inside SQLite.
+- `memorySearch.provider = "ollama"` is also supported for local/self-hosted
+  Ollama embeddings (`/api/embeddings`), but it is not auto-selected.
 
 Remote embeddings **require** an API key for the embedding provider. OpenClaw
 resolves keys from auth profiles, `models.providers.*.apiKey`, or environment
 variables. Codex OAuth only covers chat/completions and does **not** satisfy
 embeddings for memory search. For Gemini, use `GEMINI_API_KEY` or
 `models.providers.google.apiKey`. For Voyage, use `VOYAGE_API_KEY` or
-`models.providers.voyage.apiKey`. When using a custom OpenAI-compatible endpoint,
+`models.providers.voyage.apiKey`. For Mistral, use `MISTRAL_API_KEY` or
+`models.providers.mistral.apiKey`. Ollama typically does not require a real API
+key (a placeholder like `OLLAMA_API_KEY=ollama-local` is enough when needed by
+local policy).
+When using a custom OpenAI-compatible endpoint,
 set `memorySearch.remote.apiKey` (and optional `memorySearch.remote.headers`).
 
 ### QMD backend (experimental)
@@ -303,6 +310,29 @@ Notes:
 - `remote.baseUrl` is optional (defaults to the Gemini API base URL).
 - `remote.headers` lets you add extra headers if needed.
 - Default model: `gemini-embedding-001`.
+- `gemini-embedding-2-preview` is also supported: 8192 token limit and configurable dimensions (768 / 1536 / 3072, default 3072).
+
+#### Gemini Embedding 2 (preview)
+
+```json5
+agents: {
+  defaults: {
+    memorySearch: {
+      provider: "gemini",
+      model: "gemini-embedding-2-preview",
+      outputDimensionality: 3072,  // optional: 768, 1536, or 3072 (default)
+      remote: {
+        apiKey: "YOUR_GEMINI_API_KEY"
+      }
+    }
+  }
+}
+```
+
+> **⚠️ Re-index required:** Switching from `gemini-embedding-001` (768 dimensions)
+> to `gemini-embedding-2-preview` (3072 dimensions) changes the vector size. The same is true if you
+> change `outputDimensionality` between 768, 1536, and 3072.
+> OpenClaw will automatically reindex when it detects a model or dimension change.
 
 If you want to use a **custom OpenAI-compatible endpoint** (OpenRouter, vLLM, or a proxy),
 you can use the `remote` configuration with the OpenAI provider:
@@ -328,7 +358,7 @@ If you don't want to set an API key, use `memorySearch.provider = "local"` or se
 
 Fallbacks:
 
-- `memorySearch.fallback` can be `openai`, `gemini`, `local`, or `none`.
+- `memorySearch.fallback` can be `openai`, `gemini`, `voyage`, `mistral`, `ollama`, `local`, or `none`.
 - The fallback provider is only used when the primary embedding provider fails.
 
 Batch indexing (OpenAI + Gemini + Voyage):
