@@ -1,46 +1,68 @@
-import type { ConnectParams } from "../../protocol/index.js";
+// WebSocket connect policy resolves Control UI pairing bypasses and missing-device identity decisions.
+import type { ConnectParams } from "../../../../packages/gateway-protocol/src/index.js";
 import type { GatewayRole } from "../../role-policy.js";
 import { roleCanSkipDeviceIdentity } from "../../role-policy.js";
 
-export type ControlUiAuthPolicy = {
-  allowInsecureAuthConfigured: boolean;
-  dangerouslyDisableDeviceAuth: boolean;
-  allowBypass: boolean;
+type ControlUiAuthPolicy = {
+  isControlUi: boolean;
   device: ConnectParams["device"] | null | undefined;
+  deviceAuthMigrationPending: boolean;
 };
 
 export function resolveControlUiAuthPolicy(params: {
   isControlUi: boolean;
-  controlUiConfig:
-    | {
-        allowInsecureAuth?: boolean;
-        dangerouslyDisableDeviceAuth?: boolean;
-      }
-    | undefined;
+  controlUiConfig: unknown;
   deviceRaw: ConnectParams["device"] | null | undefined;
+  deviceAuthMigrationPending?: boolean;
 }): ControlUiAuthPolicy {
-  const allowInsecureAuthConfigured =
-    params.isControlUi && params.controlUiConfig?.allowInsecureAuth === true;
-  const dangerouslyDisableDeviceAuth =
-    params.isControlUi && params.controlUiConfig?.dangerouslyDisableDeviceAuth === true;
+  void params.controlUiConfig;
   return {
-    allowInsecureAuthConfigured,
-    dangerouslyDisableDeviceAuth,
-    // `allowInsecureAuth` must not bypass secure-context/device-auth requirements.
-    allowBypass: dangerouslyDisableDeviceAuth,
-    device: dangerouslyDisableDeviceAuth ? null : params.deviceRaw,
+    isControlUi: params.isControlUi,
+    device: params.deviceRaw,
+    deviceAuthMigrationPending: params.deviceAuthMigrationPending === true,
   };
+}
+
+export function shouldAllowControlUiDeviceAuthMigration(params: {
+  policy: ControlUiAuthPolicy;
+  role: GatewayRole;
+  sharedAuthOk: boolean;
+  trustedProxyAuthOk?: boolean;
+  authMethod?: string;
+}): boolean {
+  const sharedAuthOk =
+    params.sharedAuthOk && (params.authMethod === "token" || params.authMethod === "password");
+  const trustedProxyAuthOk =
+    params.trustedProxyAuthOk === true && params.authMethod === "trusted-proxy";
+  return (
+    params.policy.deviceAuthMigrationPending &&
+    params.policy.isControlUi &&
+    params.role === "operator" &&
+    (sharedAuthOk || trustedProxyAuthOk)
+  );
 }
 
 export function shouldSkipControlUiPairing(
   policy: ControlUiAuthPolicy,
-  sharedAuthOk: boolean,
-  trustedProxyAuthOk = false,
+  role: GatewayRole,
+  _trustedProxyAuthOk = false,
+  authMode?: string,
+  authMethod?: string,
 ): boolean {
-  if (trustedProxyAuthOk) {
+  if (policy.isControlUi && role === "operator" && authMethod === "tailscale" && policy.device) {
     return true;
   }
-  return policy.allowBypass && sharedAuthOk;
+  // When auth is completely disabled (mode=none), there is no shared secret
+  // or token to gate pairing. Requiring pairing in this configuration adds
+  // friction without security value since any client can already connect
+  // without credentials. Guard with policy.isControlUi because this function
+  // is called for ALL clients (not just Control UI) at the call site.
+  // Scope to operator role so node-role sessions still need device identity
+  // (#43478 was reverted for skipping ALL clients).
+  if (policy.isControlUi && role === "operator" && authMode === "none") {
+    return true;
+  }
+  return false;
 }
 
 export function isTrustedProxyControlUiOperatorAuth(params: {
@@ -59,11 +81,27 @@ export function isTrustedProxyControlUiOperatorAuth(params: {
   );
 }
 
-export type MissingDeviceIdentityDecision =
+type MissingDeviceIdentityDecision =
   | { kind: "allow" }
   | { kind: "reject-control-ui-insecure-auth" }
   | { kind: "reject-unauthorized" }
   | { kind: "reject-device-required" };
+
+export function shouldClearUnboundScopesForMissingDeviceIdentity(params: {
+  decision: MissingDeviceIdentityDecision;
+  controlUiAuthPolicy: ControlUiAuthPolicy;
+  preserveInsecureLocalControlUiScopes: boolean;
+  authMethod: string | undefined;
+  trustedProxyAuthOk?: boolean;
+}): boolean {
+  return (
+    params.decision.kind !== "allow" ||
+    (!params.preserveInsecureLocalControlUiScopes &&
+      (params.authMethod === "token" ||
+        params.authMethod === "password" ||
+        params.authMethod === "trusted-proxy"))
+  );
+}
 
 export function evaluateMissingDeviceIdentity(params: {
   hasDeviceIdentity: boolean;
@@ -71,6 +109,7 @@ export function evaluateMissingDeviceIdentity(params: {
   isControlUi: boolean;
   controlUiAuthPolicy: ControlUiAuthPolicy;
   trustedProxyAuthOk?: boolean;
+  localBackendSelfPairingOk?: boolean;
   sharedAuthOk: boolean;
   authOk: boolean;
   hasSharedAuth: boolean;
@@ -82,15 +121,11 @@ export function evaluateMissingDeviceIdentity(params: {
   if (params.isControlUi && params.trustedProxyAuthOk) {
     return { kind: "allow" };
   }
-  if (params.isControlUi && !params.controlUiAuthPolicy.allowBypass) {
-    // Allow localhost Control UI connections when allowInsecureAuth is configured.
-    // Localhost has no network interception risk, and browser SubtleCrypto
-    // (needed for device identity) is unavailable in insecure HTTP contexts.
-    // Remote connections are still rejected to preserve the MitM protection
-    // that the security fix (#20684) intended.
-    if (!params.controlUiAuthPolicy.allowInsecureAuthConfigured || !params.isLocalClient) {
-      return { kind: "reject-control-ui-insecure-auth" };
-    }
+  if (params.localBackendSelfPairingOk && params.role === "operator") {
+    return { kind: "allow" };
+  }
+  if (params.isControlUi) {
+    return { kind: "reject-control-ui-insecure-auth" };
   }
   if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) {
     return { kind: "allow" };

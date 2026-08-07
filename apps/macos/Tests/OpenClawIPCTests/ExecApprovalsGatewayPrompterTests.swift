@@ -37,7 +37,7 @@ struct ExecApprovalsGatewayPrompterTests {
         #expect(!stale)
     }
 
-    @Test func `default behavior matches mode`() {
+    @Test func `remote gateway requests without presentable UI are left unresolved`() {
         let local = ExecApprovalsGatewayPrompter._testShouldPresent(
             mode: .local,
             activeSession: nil,

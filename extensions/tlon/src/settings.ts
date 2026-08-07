@@ -34,7 +34,6 @@ export type PendingApproval = {
 export type TlonSettingsStore = {
   groupChannels?: string[];
   dmAllowlist?: string[];
-  autoDiscover?: boolean;
   showModelSig?: boolean;
   autoAcceptDmInvites?: boolean;
   autoDiscoverChannels?: boolean;
@@ -55,7 +54,7 @@ export type TlonSettingsStore = {
   pendingApprovals?: PendingApproval[];
 };
 
-export type TlonSettingsState = {
+type TlonSettingsState = {
   current: TlonSettingsStore;
   loaded: boolean;
 };
@@ -118,7 +117,10 @@ function parseSettingsResponse(raw: unknown): TlonSettingsStore {
     dmAllowlist: Array.isArray(settings.dmAllowlist)
       ? settings.dmAllowlist.filter((x): x is string => typeof x === "string")
       : undefined,
-    autoDiscover: typeof settings.autoDiscover === "boolean" ? settings.autoDiscover : undefined,
+    autoDiscoverChannels:
+      typeof settings.autoDiscoverChannels === "boolean"
+        ? settings.autoDiscoverChannels
+        : undefined,
     showModelSig: typeof settings.showModelSig === "boolean" ? settings.showModelSig : undefined,
     autoAcceptDmInvites:
       typeof settings.autoAcceptDmInvites === "boolean" ? settings.autoAcceptDmInvites : undefined,
@@ -208,7 +210,7 @@ function parseSettingsEvent(event: unknown): { key: string; value: unknown } | n
       return null;
     }
     return {
-      key: String(put["entry-key"] ?? ""),
+      key: typeof put["entry-key"] === "string" ? put["entry-key"] : "",
       value: put.value,
     };
   }
@@ -220,7 +222,7 @@ function parseSettingsEvent(event: unknown): { key: string; value: unknown } | n
       return null;
     }
     return {
-      key: String(del["entry-key"] ?? ""),
+      key: typeof del["entry-key"] === "string" ? del["entry-key"] : "",
       value: undefined,
     };
   }
@@ -249,8 +251,8 @@ function applySettingsUpdate(
         ? value.filter((x): x is string => typeof x === "string")
         : undefined;
       break;
-    case "autoDiscover":
-      next.autoDiscover = typeof value === "boolean" ? value : undefined;
+    case "autoDiscoverChannels":
+      next.autoDiscoverChannels = typeof value === "boolean" ? value : undefined;
       break;
     case "showModelSig":
       next.showModelSig = typeof value === "boolean" ? value : undefined;
@@ -285,7 +287,7 @@ function applySettingsUpdate(
   return next;
 }
 
-export type SettingsLogger = {
+type SettingsLogger = {
   log?: (msg: string) => void;
   error?: (msg: string) => void;
 };
@@ -299,7 +301,7 @@ export type SettingsLogger = {
  *   settings.subscribe((newSettings) => { ... });
  */
 export function createSettingsManager(api: UrbitSSEClient, logger?: SettingsLogger) {
-  let state: TlonSettingsState = {
+  const state: TlonSettingsState = {
     current: {},
     loaded: false,
   };

@@ -2,11 +2,10 @@ package ai.openclaw.app.voice
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -14,123 +13,98 @@ class TalkModeConfigParsingTest {
   private val json = Json { ignoreUnknownKeys = true }
 
   @Test
-  fun prefersCanonicalResolvedTalkProviderPayload() {
-    val talk =
-      json.parseToJsonElement(
+  fun readsMainSessionKeyAndInterruptFlag() {
+    val config =
+      json
+        .parseToJsonElement(
           """
           {
-            "resolved": {
-              "provider": "elevenlabs",
-              "config": {
-                "voiceId": "voice-resolved"
-              }
+            "talk": {
+              "interruptOnSpeech": true,
+              "speechLocale": "de_DE",
+              "silenceTimeoutMs": 1800
             },
-            "provider": "elevenlabs",
-            "providers": {
-              "elevenlabs": {
-                "voiceId": "voice-normalized"
-              }
+            "session": {
+              "mainKey": "voice-main"
             }
           }
           """.trimIndent(),
-        )
-        .jsonObject
+        ).jsonObject
 
-    val selection = TalkModeGatewayConfigParser.selectTalkProviderConfig(talk)
-    assertNotNull(selection)
-    assertEquals("elevenlabs", selection?.provider)
-    assertTrue(selection?.normalizedPayload == true)
-    assertEquals("voice-resolved", selection?.config?.get("voiceId")?.jsonPrimitive?.content)
+    val parsed = TalkModeGatewayConfigParser.parse(config)
+
+    assertEquals("voice-main", parsed.mainSessionKey)
+    assertEquals("de-DE", parsed.speechLocale)
+    assertEquals(true, parsed.interruptOnSpeech)
+    assertEquals(1800L, parsed.silenceTimeoutMs)
   }
 
   @Test
-  fun prefersNormalizedTalkProviderPayload() {
-    val talk =
-      json.parseToJsonElement(
-          """
-          {
-            "provider": "elevenlabs",
-            "providers": {
-              "elevenlabs": {
-                "voiceId": "voice-normalized"
-              }
-            },
-            "voiceId": "voice-legacy"
-          }
-          """.trimIndent(),
-        )
-        .jsonObject
-
-    val selection = TalkModeGatewayConfigParser.selectTalkProviderConfig(talk)
-    assertEquals(null, selection)
+  fun derivesRealtimeLanguageFromConfiguredLocale() {
+    assertEquals("de", realtimeTranscriptionLanguage("de-DE"))
+    assertEquals(null, realtimeTranscriptionLanguage("fil-PH"))
   }
 
   @Test
-  fun rejectsNormalizedTalkProviderPayloadWhenProviderMissingFromProviders() {
-    val talk =
-      json.parseToJsonElement(
-          """
-          {
-            "provider": "acme",
-            "providers": {
-              "elevenlabs": {
-                "voiceId": "voice-normalized"
-              }
-            }
-          }
-          """.trimIndent(),
-        )
-        .jsonObject
+  fun gatesAndroidRealtimeRelayFromEffectiveModel() {
+    val browserOnly =
+      json
+        .parseToJsonElement(
+          """{"talk":{"realtime":{"model":"gpt-live-future"}}}""",
+        ).jsonObject
+    val relayCapable =
+      json
+        .parseToJsonElement(
+          """{"talk":{"realtime":{"model":"gpt-realtime-2.1"}}}""",
+        ).jsonObject
 
-    val selection = TalkModeGatewayConfigParser.selectTalkProviderConfig(talk)
-    assertEquals(null, selection)
+    assertFalse(TalkModeGatewayConfigParser.parse(browserOnly).realtimeRelayModelSupported)
+    assertTrue(TalkModeGatewayConfigParser.parse(relayCapable).realtimeRelayModelSupported)
   }
 
   @Test
-  fun rejectsNormalizedTalkProviderPayloadWhenProviderIsAmbiguous() {
-    val talk =
-      json.parseToJsonElement(
-          """
-          {
-            "providers": {
-              "acme": {
-                "voiceId": "voice-acme"
-              },
-              "elevenlabs": {
-                "voiceId": "voice-normalized"
-              }
-            }
-          }
-          """.trimIndent(),
-        )
-        .jsonObject
+  fun gatesAndroidRealtimeRelayFromProviderLevelModel() {
+    val providerLevelBrowserOnly =
+      json
+        .parseToJsonElement(
+          """{"talk":{"realtime":{"provider":"openai","providers":{"openai":{"model":"gpt-live-1-codex"}}}}}""",
+        ).jsonObject
+    val topLevelWins =
+      json
+        .parseToJsonElement(
+          """{"talk":{"realtime":{"provider":"openai","model":"gpt-realtime-2.1","providers":{"openai":{"model":"gpt-live-1-codex"}}}}}""",
+        ).jsonObject
 
-    val selection = TalkModeGatewayConfigParser.selectTalkProviderConfig(talk)
-    assertEquals(null, selection)
+    assertFalse(TalkModeGatewayConfigParser.parse(providerLevelBrowserOnly).realtimeRelayModelSupported)
+    assertTrue(TalkModeGatewayConfigParser.parse(topLevelWins).realtimeRelayModelSupported)
   }
 
   @Test
-  fun fallsBackToLegacyTalkFieldsWhenNormalizedPayloadMissing() {
-    val legacyApiKey = "legacy-key" // pragma: allowlist secret
-    val talk =
-      buildJsonObject {
-        put("voiceId", "voice-legacy")
-        put("apiKey", legacyApiKey) // pragma: allowlist secret
-      }
-
-    val selection = TalkModeGatewayConfigParser.selectTalkProviderConfig(talk)
-    assertNotNull(selection)
-    assertEquals("elevenlabs", selection?.provider)
-    assertTrue(selection?.normalizedPayload == false)
-    assertEquals("voice-legacy", selection?.config?.get("voiceId")?.jsonPrimitive?.content)
-    assertEquals("legacy-key", selection?.config?.get("apiKey")?.jsonPrimitive?.content)
-  }
-
-  @Test
-  fun readsConfiguredSilenceTimeoutMs() {
-    val talk = buildJsonObject { put("silenceTimeoutMs", 1500) }
-
-    assertEquals(1500L, TalkModeGatewayConfigParser.resolvedSilenceTimeoutMs(talk))
+  fun resolvesRealtimeLanguageFromConfigThenWatchThenPhone() {
+    assertEquals(
+      "de",
+      resolveRealtimeTranscriptionLanguageHint(
+        configuredLocaleTag = "de-DE",
+        requestedLanguage = "en",
+        deviceLocaleTag = "fr-FR",
+      ),
+    )
+    assertEquals(
+      "en",
+      resolveRealtimeTranscriptionLanguageHint(
+        configuredLocaleTag = null,
+        requestedLanguage = "en",
+        deviceLocaleTag = "fr-FR",
+      ),
+    )
+    assertEquals(
+      "fr",
+      resolveRealtimeTranscriptionLanguageHint(
+        configuredLocaleTag = null,
+        requestedLanguage = null,
+        deviceLocaleTag = "fr-FR",
+      ),
+    )
   }
 
   @Test

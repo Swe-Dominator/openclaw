@@ -1,30 +1,48 @@
-import { resolveMatrixRoomId } from "../send.js";
-import { resolveActionClient } from "./client.js";
-import { resolveMatrixActionLimit } from "./limits.js";
+// Matrix plugin module implements reactions behavior.
 import {
-  EventType,
-  RelationType,
-  type MatrixActionClientOpts,
-  type MatrixRawEvent,
-  type MatrixReactionSummary,
-  type ReactionEventContent,
-} from "./types.js";
+  buildMatrixReactionRelationsPath,
+  selectOwnMatrixReactionEventIds,
+  summarizeMatrixReactionEvents,
+} from "../reaction-common.js";
+import { withResolvedRoomAction } from "./client.js";
+import { resolveMatrixActionLimit } from "./limits.js";
+import type { MatrixActionClientOpts, MatrixRawEvent, MatrixReactionSummary } from "./types.js";
 
-function getReactionsPath(roomId: string, messageId: string): string {
-  return `/_matrix/client/v1/rooms/${encodeURIComponent(roomId)}/relations/${encodeURIComponent(messageId)}/${RelationType.Annotation}/${EventType.Reaction}`;
-}
+type ActionClient = NonNullable<MatrixActionClientOpts["client"]>;
 
-async function listReactionEvents(
-  client: NonNullable<MatrixActionClientOpts["client"]>,
+async function listMatrixReactionEvents(
+  client: ActionClient,
   roomId: string,
   messageId: string,
   limit: number,
+  opts: { allPages?: boolean } = {},
 ): Promise<MatrixRawEvent[]> {
-  const res = (await client.doRequest("GET", getReactionsPath(roomId, messageId), {
-    dir: "b",
-    limit,
-  })) as { chunk: MatrixRawEvent[] };
-  return res.chunk;
+  const events: MatrixRawEvent[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  while (true) {
+    const res = (await client.doRequest(
+      "GET",
+      buildMatrixReactionRelationsPath(roomId, messageId),
+      {
+        dir: "b",
+        limit,
+        ...(cursor ? { from: cursor } : {}),
+      },
+    )) as { chunk?: MatrixRawEvent[]; next_batch?: unknown };
+    if (Array.isArray(res.chunk)) {
+      events.push(...res.chunk);
+    }
+    const nextCursor = typeof res.next_batch === "string" ? res.next_batch.trim() : "";
+    if (!nextCursor || (!opts.allPages && events.length >= limit)) {
+      return events;
+    }
+    if (seenCursors.has(nextCursor)) {
+      throw new Error("Matrix reaction pagination returned a repeated cursor");
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
 }
 
 export async function listMatrixReactions(
@@ -32,36 +50,11 @@ export async function listMatrixReactions(
   messageId: string,
   opts: MatrixActionClientOpts & { limit?: number } = {},
 ): Promise<MatrixReactionSummary[]> {
-  const { client, stopOnDone } = await resolveActionClient(opts);
-  try {
-    const resolvedRoom = await resolveMatrixRoomId(client, roomId);
+  return await withResolvedRoomAction(roomId, opts, async (client, resolvedRoom) => {
     const limit = resolveMatrixActionLimit(opts.limit, 100);
-    const chunk = await listReactionEvents(client, resolvedRoom, messageId, limit);
-    const summaries = new Map<string, MatrixReactionSummary>();
-    for (const event of chunk) {
-      const content = event.content as ReactionEventContent;
-      const key = content["m.relates_to"]?.key;
-      if (!key) {
-        continue;
-      }
-      const sender = event.sender ?? "";
-      const entry: MatrixReactionSummary = summaries.get(key) ?? {
-        key,
-        count: 0,
-        users: [],
-      };
-      entry.count += 1;
-      if (sender && !entry.users.includes(sender)) {
-        entry.users.push(sender);
-      }
-      summaries.set(key, entry);
-    }
-    return Array.from(summaries.values());
-  } finally {
-    if (stopOnDone) {
-      client.stop();
-    }
-  }
+    const chunk = await listMatrixReactionEvents(client, resolvedRoom, messageId, limit);
+    return summarizeMatrixReactionEvents(chunk);
+  });
 }
 
 export async function removeMatrixReactions(
@@ -69,34 +62,21 @@ export async function removeMatrixReactions(
   messageId: string,
   opts: MatrixActionClientOpts & { emoji?: string } = {},
 ): Promise<{ removed: number }> {
-  const { client, stopOnDone } = await resolveActionClient(opts);
-  try {
-    const resolvedRoom = await resolveMatrixRoomId(client, roomId);
-    const chunk = await listReactionEvents(client, resolvedRoom, messageId, 200);
+  return await withResolvedRoomAction(roomId, opts, async (client, resolvedRoom) => {
+    // A message can have hundreds of newer reactions; the bot's own reaction may
+    // be on a later page, so fetch all pages before mutating any server state.
+    const chunk = await listMatrixReactionEvents(client, resolvedRoom, messageId, 200, {
+      allPages: true,
+    });
     const userId = await client.getUserId();
     if (!userId) {
       return { removed: 0 };
     }
-    const targetEmoji = opts.emoji?.trim();
-    const toRemove = chunk
-      .filter((event) => event.sender === userId)
-      .filter((event) => {
-        if (!targetEmoji) {
-          return true;
-        }
-        const content = event.content as ReactionEventContent;
-        return content["m.relates_to"]?.key === targetEmoji;
-      })
-      .map((event) => event.event_id)
-      .filter((id): id is string => Boolean(id));
+    const toRemove = selectOwnMatrixReactionEventIds(chunk, userId, opts.emoji);
     if (toRemove.length === 0) {
       return { removed: 0 };
     }
     await Promise.all(toRemove.map((id) => client.redactEvent(resolvedRoom, id)));
     return { removed: toRemove.length };
-  } finally {
-    if (stopOnDone) {
-      client.stop();
-    }
-  }
+  });
 }
